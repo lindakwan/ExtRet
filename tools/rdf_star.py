@@ -1,4 +1,5 @@
 import csv
+import random
 
 # Dictionary to store all quoted triples and their corresponding blank nodes
 # key: RDF* triple as string, value: Blank node
@@ -538,3 +539,237 @@ class Buffer():
         return self.row_values[0] 
 
 
+'''
+   The following functions are only available for RDF* triples with
+   the following structures:
+   E.g. RDF triples with format (s, p, o)
+        RDF* triples with format ((s, p, o), p, o)
+'''
+
+# Parse triples from csv file
+def parse_csv(file_name):
+    file = open(file_name, encoding='utf-8')
+    read_file = csv.reader(file, delimiter=",")
+    graph = RDF_Star_Graph()
+    
+    for row in read_file:
+        length = len(row)
+        
+        if length == 3:
+            graph.add(RDF_Star_Triple(row[0], row[1], row[2]), copy=False)
+        
+        elif length > 3:
+            for i in range(3, length, 2):
+                graph.add(RDF_Star_Triple((row[0], row[1], row[2]), row[i], row[i+1]), copy=False)
+                
+    return graph
+
+# Serialise triples to csv file
+def serialise_csv(file_name, graph):
+    with open(file_name, 'w', encoding='utf-8', newline="") as out_file:
+        writer = csv.writer(out_file, delimiter=",")
+        for triple in graph:
+            if triple.isRDFTriple():
+                writer.writerow([triple.subj, triple.pred, triple.obj])
+            else:
+                writer.writerow([triple.subj.subj, triple.subj.pred, triple.subj.obj, triple.pred, triple.obj])
+
+# Get all entites and predicates
+def get_entities_and_predicates(file_name):
+    entities = set()
+    predicates = set()
+    
+    file = open(file_name, encoding='utf-8')
+    read_file = csv.reader(file, delimiter=",")
+    
+    for row in read_file:
+        for i in range(len(row)):
+            if i % 2 == 0:
+                entities.add(row[i])
+            else:
+                predicates.add(row[i])
+    
+    file.close()
+    
+    return entities, predicates
+
+# Pick random entities from csv file
+def pick_random_entities(file_name, num_of_entities):
+    entities, _ = get_entities_and_predicates(file_name)
+    random_entities = random.choices(list(entities), k=num_of_entities)
+    return random_entities
+
+# Pick random entities from graph
+def pick_random_entities_graph(graph, num_of_entities):
+    entities = graph_entities(graph)
+    random_entities = random.choices(entities, k=num_of_entities)
+    return random_entities
+
+# Generate a subgraph from the list of entities
+def generate_subset(graph, entities_list):
+    new_graph = RDF_Star_Graph()
+    
+    for triple in graph:
+        if _triple_check(triple, entities_list):
+            new_graph.add(triple)
+            
+    return new_graph
+
+# Generate a subgraph from the list of entities, but put a cap on the number of 
+# triples per entity
+def generate_subset_limited(graph, entities_list, limit):
+    entities_count = dict()
+    new_graph = RDF_Star_Graph()
+    
+    for triple in graph:
+        if _triple_check(triple, entities_list):
+            # Check limit before adding
+            triple_ents = triple_entities(triple)
+            
+            for ent in triple_ents:
+                if (ent in entities_list) and (entities_count.setdefault(ent, 0) < limit):
+                    
+                    # Add to graph only if not all limits are reached
+                    # Entity needs to be in the list
+                    new_graph.add(triple)
+                    
+                    # Add to limit count of that particular entity
+                    # Allow space in other entities
+                    if ent in entities_count:
+                        entities_count[ent] += 1
+                    else:
+                        entities_count[ent] = 1
+                        
+                    break
+    
+    return new_graph
+
+# Do sampling process twice with cap of number of triples per entity
+def double_sampling(graph, first_entity_count, first_stmt_limit, second_entity_count, second_stmt_limit):
+    print("Picking initial set of entities ...")
+    init_entities = pick_random_entities_graph(graph, first_entity_count)
+    print("Generating first subset ...")
+    first_subset = generate_subset_limited(graph, init_entities, first_stmt_limit)
+    
+    print("Picking entities within the subset ...")
+    snd_entities = pick_random_entities_graph(first_subset, second_entity_count)
+    print("Generating new subset ...")
+    sec_subset = generate_subset_limited(graph, snd_entities, second_stmt_limit)
+    
+    return sec_subset
+
+# Do sampling process twice, but without the cap on number of triples per entity
+def double_sampling_full(graph, first_entity_count, second_entity_count):
+    print("Picking initial set of entities ...")
+    init_entities = pick_random_entities_graph(graph, first_entity_count)
+    print("Generating first subset ...")
+    first_subset = generate_subset(graph, init_entities)
+    
+    print("Picking entities within the subset ...")
+    snd_entities = pick_random_entities_graph(first_subset, second_entity_count)
+    print("Generating new subset ...")
+    sec_subset = generate_subset(graph, union(init_entities, snd_entities))
+    
+    return sec_subset
+
+# Check if the triple contains entities that are in the list of entities
+def _triple_check(triple, entities_list):
+    # Case 1: Single-level RDF* triple
+    if triple.isRDFTriple():
+        return (triple.subj in entities_list) or (triple.obj in entities_list)
+    
+    # Case 2: Subject is RDF* triple, object is not RDF* triple
+    elif isinstance(triple.subj, RDF_Star_Triple) and not isinstance(triple.obj, RDF_Star_Triple):
+        return _triple_check(triple.subj, entities_list) or (triple.obj in entities_list)
+    
+    # Case 3: Object is RDF*, subject is not RDF*
+    elif not isinstance(triple.subj, RDF_Star_Triple) and isinstance(triple.obj, RDF_Star_Triple):
+        return (triple.subj in entities_list) or _triple_check(triple.obj, entities_list)
+    
+    # Case 4: Both subject and object are RDF* triples
+    elif isinstance(triple.subj, RDF_Star_Triple) and isinstance(triple.obj, RDF_Star_Triple):
+        return _triple_check(triple.subj, entities_list) or _triple_check(triple.obj, entities_list)
+
+# Count the number of entities in a graph
+def entity_count(graph):    
+    return len(graph_entities(graph))
+
+def graph_entities(graph):
+    entities = []
+    
+    for triple in graph:
+        for ent in triple_entities(triple):
+            if not (ent in entities):
+                entities.append(ent)
+    
+    return entities
+
+# Helper function to get list of entities in a triple
+def triple_entities(triple):
+    entities = []
+    if not isinstance(triple.subj, RDF_Star_Triple):
+        # So the subject is not an RDF* triple
+        if not (str(triple.subj) in entities):
+            entities.append(str(triple.subj))
+    else:
+        for ent in triple_entities(triple.subj):
+            if not (ent in entities):
+                entities.append(ent)
+    
+    if not isinstance(triple.obj, RDF_Star_Triple):
+        # So the object is not an RDF* triple
+        if not (str(triple.obj) in entities):
+            entities.append(str(triple.obj))
+    else:
+        for ent in triple_entities(triple.obj):
+            if not (ent in entities):
+                entities.append(ent)
+    
+    return entities
+
+# Define relationship count
+def relation_count(graph):
+    return len(graph_relations(graph))
+    
+def graph_relations(graph):
+    relations = []
+    
+    for triple in graph:
+        for rel in triple_relations(triple):
+            if not (rel in relations):
+                relations.append(rel)
+    
+    return relations
+    
+# Helper function to get list of relations in a triple
+def triple_relations(triple):
+    relations = [str(triple.pred)]
+    
+    if isinstance(triple.subj, RDF_Star_Triple):
+        for rel in triple_relations(triple.subj):
+            if not (rel in relations):
+                relations.append(rel)
+    
+    if isinstance(triple.obj, RDF_Star_Triple):
+        for rel in triple_relations(triple.obj):
+            if not (rel in relations):
+                relations.append(rel)
+    
+    return relations
+
+def union(list1, list2):
+    return list(set(list1) | set(list2))
+
+def total_entity_count(train, test):
+    return len(union(graph_entities(train), graph_entities(test)))
+
+def total_relation_count(train, test):
+    return len(union(graph_relations(train), graph_relations(test)))
+
+# Count the number of unique triples
+def unique_triples_count(graph):
+    return len(graph_triples(graph))
+
+# Helper function
+def graph_triples(graph):
+    return set(list(map(str, graph)))
